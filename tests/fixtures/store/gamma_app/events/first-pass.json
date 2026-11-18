@@ -1,0 +1,13 @@
+{
+  "assertion_notice": "Agent assertion; not independently verified proof.",
+  "can": "Export a sample file",
+  "cannot": "Export a large file",
+  "evidence": "Opened the exported sample",
+  "next_gap": "Stream large exports",
+  "progress": "advanced",
+  "project_id": "gamma_app",
+  "recorded_at": "2026-03-02T12:00:00.000000Z",
+  "schema_version": 1,
+  "stage": "available",
+  "unit": "first-pass"
+}

@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-03-01T12:00:00.000000Z",
+  "entry_point": "Run the export command",
+  "initial_next_gap": "Export one sample file",
+  "intent": "R\u00e9sum\u00e9 export stays readable",
+  "project_id": "gamma_app",
+  "schema_version": 1
+}

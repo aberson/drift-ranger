@@ -1,0 +1,13 @@
+{
+  "assertion_notice": "Agent assertion; not independently verified proof.",
+  "can": "Complete the basic workflow",
+  "cannot": "Handle interrupted input",
+  "evidence": null,
+  "next_gap": "Recover from interruption",
+  "progress": "unchanged",
+  "project_id": "alpha-tool",
+  "recorded_at": "2026-01-08T10:00:00.000000Z",
+  "schema_version": 1,
+  "stage": null,
+  "unit": "unit-003"
+}

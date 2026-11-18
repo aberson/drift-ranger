@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-02-01T08:30:00.000000Z",
+  "entry_point": "Open the local page",
+  "initial_next_gap": "Render the first page",
+  "intent": "Serve a sample page locally",
+  "project_id": "beta.service",
+  "schema_version": 1
+}

@@ -1,0 +1,53 @@
+[project]
+name = "drift-ranger"
+# The version is defined once, in src/drift_ranger/__init__.py (see [tool.hatch.version]).
+dynamic = ["version"]
+description = "Local CLI that records agent assertions about project capability, gaps and stalled progress."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.8"
+# Standard library only: no runtime dependency.
+dependencies = []
+
+[project.scripts]
+# The console command, `python -m drift_ranger` and the `python drift_ranger.py` checkout
+# shim all run drift_ranger.cli:main.
+drift-ranger = "drift_ranger.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/drift_ranger/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/drift_ranger"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+# A frozen copy of the pre-package script, kept verbatim as the behaviour baseline.
+extend-exclude = ["tests/fixtures/baseline"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.mypy]
+strict = true
+warn_unused_ignores = true
+mypy_path = "src"
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import the package from src, ahead of the same-named checkout shim at the repository root.
+pythonpath = ["src"]

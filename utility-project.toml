@@ -1,0 +1,31 @@
+schema_version = 1
+
+[project]
+name = "drift-ranger"
+product_shape = "standalone-cli"
+publication_shape = "public"
+maturity = "experimental"
+license_spdx = "MIT"
+
+[readme]
+path = "README.md"
+modules = ["input-output", "exit-codes", "development"]
+
+[commands]
+install = "uv tool install --from . drift-ranger"
+quickstart = "drift-ranger list"
+verify = "uv run --extra dev pytest -q"
+
+[publication]
+overlay_strategy = "none"
+remote_audit = false
+
+[[platform]]
+name = "Windows 11 (Python 3.14, uv)"
+verification_state = "verified"
+evidence = "tests/test_cli.py"
+
+[[platform]]
+name = "Linux and macOS (Python 3.8+)"
+verification_state = "declared"
+evidence = "README.md"

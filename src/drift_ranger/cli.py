@@ -1,0 +1,426 @@
+"""Keep private, local checkpoints about whether a project is advancing."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
+
+from drift_ranger import __version__
+
+SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+NON_ADVANCING = {"unchanged", "unknown"}
+REASSESS_AFTER = 2
+# The values `checkpoint` accepts; stored records may also hold "unknown" for a qualified stage.
+PROGRESS_CHOICES = ("advanced", "unchanged", "unknown")
+STAGE_CHOICES = ("implemented", "isolated", "available", "accepted")
+
+
+class DriftRangerError(Exception):
+    """An expected error that can be shown without a traceback."""
+
+
+def default_store() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "drift-ranger"
+        return Path.home() / "AppData" / "Local" / "drift-ranger"
+
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state:
+        return Path(xdg_state) / "drift-ranger"
+    return Path.home() / ".local" / "state" / "drift-ranger"
+
+
+def repository_root() -> Path:
+    """Return the checkout root, or the installed package directory outside a checkout."""
+    package = Path(__file__).resolve().parent
+    checkout = package.parent.parent
+    if package.parent.name == "src" and (checkout / "pyproject.toml").is_file():
+        return checkout
+    return package
+
+
+def resolve_store(raw_store: str | None) -> Path:
+    store = Path(raw_store).expanduser() if raw_store else default_store()
+    store = store.resolve(strict=False)
+    repository = repository_root()
+    try:
+        store.relative_to(repository)
+    except ValueError:
+        return store
+    raise DriftRangerError(
+        "refusing a state store inside the drift-ranger repository; choose an external path"
+    )
+
+
+def validate_id(value: str, label: str) -> str:
+    if not SAFE_ID.fullmatch(value):
+        raise DriftRangerError(
+            f"invalid {label} {value!r}; use 1-64 ASCII letters, digits, dots, dashes, "
+            "or underscores, starting with a letter or digit"
+        )
+    return value
+
+
+def project_dir(store: Path, project_id: str) -> Path:
+    return store / validate_id(project_id, "project id")
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError as exc:
+        raise DriftRangerError(f"not found: {path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DriftRangerError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise DriftRangerError(f"invalid JSON object in {path}")
+    return value
+
+
+def write_exclusive(path: Path, value: dict[str, Any]) -> None:
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except FileExistsError as exc:
+        raise DriftRangerError(f"already exists: {path}") from exc
+    except OSError as exc:
+        raise DriftRangerError(f"cannot write {path}: {exc}") from exc
+
+
+def load_intent(store: Path, project_id: str) -> dict[str, Any]:
+    return read_json(project_dir(store, project_id) / "intent.json")
+
+
+def load_events(store: Path, project_id: str) -> list[dict[str, Any]]:
+    events_dir = project_dir(store, project_id) / "events"
+    if not events_dir.exists():
+        return []
+    if not events_dir.is_dir():
+        raise DriftRangerError(f"events path is not a directory: {events_dir}")
+
+    events: list[dict[str, Any]] = []
+    for path in events_dir.glob("*.json"):
+        event = read_json(path)
+        event["_filename"] = path.name
+        events.append(event)
+    events.sort(key=lambda item: (str(item.get("recorded_at", "")), item["_filename"]))
+    return events
+
+
+def non_advancing_streak(events: Sequence[dict[str, Any]]) -> int:
+    streak = 0
+    for event in reversed(events):
+        if event.get("progress", "unknown") not in NON_ADVANCING:
+            break
+        streak += 1
+    return streak
+
+
+def command_init(args: argparse.Namespace, store: Path) -> None:
+    project = project_dir(store, args.project_id)
+    try:
+        project.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DriftRangerError(f"cannot create {project}: {exc}") from exc
+
+    intent = {
+        "schema_version": 1,
+        "project_id": args.project_id,
+        "intent": args.intent,
+        "entry_point": args.entry_point,
+        "initial_next_gap": args.next_gap,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    write_exclusive(project / "intent.json", intent)
+    print(f"initialized {args.project_id} in {project}")
+
+
+def command_checkpoint(args: argparse.Namespace, store: Path) -> None:
+    project = project_dir(store, args.project_id)
+    load_intent(store, args.project_id)
+    unit = validate_id(args.unit, "unit id")
+    evidence = args.evidence.strip() if args.evidence else None
+
+    progress = args.progress
+    stage = args.stage
+    qualifications: list[str] = []
+    if progress == "advanced" and not evidence:
+        progress = "unknown"
+        qualifications.append("advanced requires evidence")
+    if stage == "available" and not evidence:
+        stage = "unknown"
+        progress = "unknown"
+        qualifications.append("available requires evidence")
+
+    events_dir = project / "events"
+    try:
+        events_dir.mkdir(exist_ok=True)
+    except OSError as exc:
+        raise DriftRangerError(f"cannot create {events_dir}: {exc}") from exc
+
+    event = {
+        "schema_version": 1,
+        "project_id": args.project_id,
+        "unit": unit,
+        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "assertion_notice": "Agent assertion; not independently verified proof.",
+        "can": args.can,
+        "cannot": args.cannot,
+        "next_gap": args.next_gap,
+        "progress": progress,
+        "stage": stage,
+        "evidence": evidence,
+    }
+    if qualifications:
+        event["qualification"] = "; ".join(qualifications)
+        event["reported_progress"] = args.progress
+        event["reported_stage"] = args.stage
+
+    write_exclusive(events_dir / f"{unit}.json", event)
+    print(
+        f"checkpointed {args.project_id}/{unit}: "
+        f"progress={progress}, stage={stage or 'not reported'}"
+    )
+    if qualifications:
+        print(f"qualified as unknown: {'; '.join(qualifications)}")
+
+
+def command_show(args: argparse.Namespace, store: Path) -> None:
+    intent = load_intent(store, args.project_id)
+    events = load_events(store, args.project_id)
+
+    print(f"Project: {args.project_id}")
+    print(f"Intent: {intent.get('intent', '')}")
+    print(f"Entry point: {intent.get('entry_point', '')}")
+    print("Record type: agent assertions, not independently verified proof")
+
+    if events:
+        latest = events[-1]
+        stage = "not reported"
+        for event in reversed(events):
+            if event.get("stage"):
+                stage = str(event["stage"])
+                break
+        print(f"Can: {latest.get('can', '')}")
+        print(f"Cannot: {latest.get('cannot', '')}")
+        print(f"Next gap: {latest.get('next_gap', '')}")
+        print(f"Stage: {stage}")
+        print(f"Latest progress: {latest.get('progress', 'unknown')}")
+    else:
+        print("Can: no checkpoint recorded")
+        print("Cannot: no checkpoint recorded")
+        print(f"Next gap: {intent.get('initial_next_gap', '')}")
+        print("Stage: not reported")
+        print("Latest progress: unknown")
+
+    streak = non_advancing_streak(events)
+    print(f"Non-advancing streak: {streak}")
+    if streak >= REASSESS_AFTER:
+        print("Advisory: REASSESS")
+    else:
+        print("Advisory: continue tracking")
+
+
+def command_list(store: Path) -> None:
+    if not store.exists():
+        print("No projects.")
+        return
+    if not store.is_dir():
+        raise DriftRangerError(f"store is not a directory: {store}")
+
+    project_ids = sorted(
+        path.name for path in store.iterdir() if path.is_dir() and (path / "intent.json").is_file()
+    )
+    if not project_ids:
+        print("No projects.")
+        return
+    for project_id in project_ids:
+        print(project_id)
+
+
+def command_export_observatory(store: Path) -> None:
+    """Publish a bounded private explorer snapshot; never modify original records."""
+
+    def record(path: Path) -> dict[str, Any]:
+        try:
+            path.resolve(strict=True).relative_to(store)
+            with path.open("rb") as handle:
+                raw = handle.read(262145)
+            if len(raw) > 262144:
+                raise DriftRangerError("record exceeds 256 KiB")
+            value = json.loads(raw)
+            if not isinstance(value, dict) or value.get("schema_version") != 1:
+                raise DriftRangerError("unsupported record schema")
+            return value
+        except (OSError, ValueError) as exc:
+            raise DriftRangerError("cannot export an invalid or uncontained record") from exc
+
+    def text(value: Any) -> str:
+        if value is None:
+            return "Unknown"
+        if not isinstance(value, str):
+            raise DriftRangerError("record text must be a string")
+        return value
+
+    if not store.is_dir():
+        raise DriftRangerError("private store is unavailable; no snapshot written")
+    items = []
+    count = 0
+    for project in sorted(store.iterdir()):
+        if project.name == "observatory":
+            continue
+        if not project.is_dir() or not (project / "intent.json").exists():
+            continue
+        validate_id(project.name, "project id")
+        intent = record(project / "intent.json")
+        if intent.get("project_id") != project.name:
+            raise DriftRangerError("intent project identity mismatch")
+        events = []
+        for path in (project / "events").glob("*.json"):
+            count += 1
+            if count > 10000:
+                raise DriftRangerError("checkpoint limit exceeded")
+            event = record(path)
+            if event.get("project_id") != project.name:
+                raise DriftRangerError("checkpoint project identity mismatch")
+            event["_filename"] = path.name
+            events.append(event)
+        events.sort(key=lambda e: (text(e.get("recorded_at")), e["_filename"]))
+        latest = events[-1] if events else {}
+        summary = text(intent.get("intent"))
+        if len(summary) > 2000:
+            raise DriftRangerError("intent exceeds explorer summary limit")
+        items.append(
+            {
+                "id": "intent-" + hashlib.sha256(project.name.encode()).hexdigest()[:24],
+                "label": project.name,
+                "summary": summary,
+                "detail": {
+                    "Intent": summary,
+                    "Entry point": text(intent.get("entry_point")),
+                    "Created at": text(intent.get("created_at")),
+                    "Current capability": text(latest.get("can")),
+                    "Remaining capability": text(latest.get("cannot")),
+                    "Next gap": text(latest.get("next_gap", intent.get("initial_next_gap"))),
+                    "Last checkpoint": text(latest.get("recorded_at")),
+                    "Reported stage": text(latest.get("stage")),
+                    "Reported progress": text(latest.get("progress")),
+                    "Advisory": "REASSESS"
+                    if non_advancing_streak(events) >= 2
+                    else ("Continue tracking" if events else "No checkpoints recorded"),
+                    "Evidence boundary": "Agent assertions, not independently verified delivery.",
+                },
+            }
+        )
+        if len(items) > 1000:
+            raise DriftRangerError("project limit exceeded")
+    payload = {
+        "schema": "explorer.v1",
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "items": items,
+    }
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > 1000000:
+        raise DriftRangerError("snapshot exceeds 1 MB")
+    output_dir = store / "observatory"
+    output_dir.resolve(strict=False).relative_to(store)
+    output_dir.mkdir(exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output_dir, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(encoded)
+        temporary.replace(output_dir / "intents.json")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f"Refreshed private intent snapshot: {len(items)} projects.")
+
+
+def add_store_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--store",
+        default=argparse.SUPPRESS,
+        help="external private state directory (default: platform user state directory)",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="drift-ranger",
+        description="Record local agent assertions about project progress.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    add_store_argument(parser)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser("init", help="create an immutable project intent")
+    add_store_argument(init_parser)
+    init_parser.add_argument("project_id")
+    init_parser.add_argument("--intent", required=True)
+    init_parser.add_argument("--entry-point", required=True)
+    init_parser.add_argument("--next-gap", required=True)
+
+    show_parser = commands.add_parser("show", help="show current assertions and advisory")
+    add_store_argument(show_parser)
+    show_parser.add_argument("project_id")
+
+    checkpoint_parser = commands.add_parser(
+        "checkpoint", help="append one unique work-unit assertion"
+    )
+    add_store_argument(checkpoint_parser)
+    checkpoint_parser.add_argument("project_id")
+    checkpoint_parser.add_argument("--unit", required=True)
+    checkpoint_parser.add_argument("--can", required=True)
+    checkpoint_parser.add_argument("--cannot", required=True)
+    checkpoint_parser.add_argument("--next-gap", required=True)
+    checkpoint_parser.add_argument("--progress", required=True, choices=PROGRESS_CHOICES)
+    checkpoint_parser.add_argument("--evidence")
+    checkpoint_parser.add_argument("--stage", choices=STAGE_CHOICES)
+
+    list_parser = commands.add_parser("list", help="list initialized project ids")
+    add_store_argument(list_parser)
+    export_parser = commands.add_parser(
+        "export-observatory", help="refresh private intent explorer snapshot"
+    )
+    add_store_argument(export_parser)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        store = resolve_store(getattr(args, "store", None))
+        if args.command == "init":
+            command_init(args, store)
+        elif args.command == "checkpoint":
+            command_checkpoint(args, store)
+        elif args.command == "show":
+            command_show(args, store)
+        elif args.command == "export-observatory":
+            command_export_observatory(store)
+        elif args.command == "list":
+            command_list(store)
+        else:
+            raise DriftRangerError(f"unsupported command: {args.command}")
+    except DriftRangerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

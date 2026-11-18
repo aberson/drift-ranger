@@ -1,0 +1,8 @@
+{
+  "created_at": "2026-01-05T09:00:00.000000Z",
+  "entry_point": "Run the documented command",
+  "initial_next_gap": "Exercise the first real workflow",
+  "intent": "Make one routine reliable",
+  "project_id": "alpha-tool",
+  "schema_version": 1
+}

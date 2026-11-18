@@ -1,4 +1,5 @@
 """Private export tests use disposable synthetic records only."""
+
 import contextlib
 import io
 import json
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import drift_ranger as dr
+from drift_ranger import cli as dr
 
 
 class ExportTests(unittest.TestCase):
@@ -14,13 +15,45 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = Path(directory).resolve()
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(dr.main(["init", "Example.Project", "--store", str(store),
-                    "--intent", "Make routine reliable", "--entry-point", "Open the app",
-                    "--next-gap", "First real workflow"]), 0)
+                self.assertEqual(
+                    dr.main(
+                        [
+                            "init",
+                            "Example.Project",
+                            "--store",
+                            str(store),
+                            "--intent",
+                            "Make routine reliable",
+                            "--entry-point",
+                            "Open the app",
+                            "--next-gap",
+                            "First real workflow",
+                        ]
+                    ),
+                    0,
+                )
                 for unit in ("one", "two"):
-                    self.assertEqual(dr.main(["checkpoint", "Example.Project", "--store", str(store),
-                        "--unit", unit, "--can", "Preview", "--cannot", "Deliver",
-                        "--next-gap", "Connect", "--progress", "unchanged"]), 0)
+                    self.assertEqual(
+                        dr.main(
+                            [
+                                "checkpoint",
+                                "Example.Project",
+                                "--store",
+                                str(store),
+                                "--unit",
+                                unit,
+                                "--can",
+                                "Preview",
+                                "--cannot",
+                                "Deliver",
+                                "--next-gap",
+                                "Connect",
+                                "--progress",
+                                "unchanged",
+                            ]
+                        ),
+                        0,
+                    )
                 before = {p: p.read_bytes() for p in store.rglob("*.json")}
                 self.assertEqual(dr.main(["export-observatory", "--store", str(store)]), 0)
             artifact = json.loads((store / "observatory/intents.json").read_text())
@@ -43,7 +76,9 @@ class ExportTests(unittest.TestCase):
             store = Path(directory).resolve()
             with contextlib.redirect_stdout(io.StringIO()):
                 dr.command_export_observatory(store)
-            self.assertEqual(json.loads((store / "observatory/intents.json").read_text())["items"], [])
+            self.assertEqual(
+                json.loads((store / "observatory/intents.json").read_text())["items"], []
+            )
             with self.assertRaises(dr.DriftRangerError):
                 dr.command_export_observatory(store / "missing")
 
