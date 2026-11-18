@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import tempfile
 import os
 import re
 import sys
@@ -232,6 +234,98 @@ def command_list(store: Path) -> None:
         print(project_id)
 
 
+def command_export_observatory(store: Path) -> None:
+    """Publish a bounded private explorer snapshot; never modify original records."""
+    def record(path: Path) -> Dict[str, Any]:
+        try:
+            path.resolve(strict=True).relative_to(store)
+            with path.open("rb") as handle:
+                raw = handle.read(262145)
+            if len(raw) > 262144:
+                raise DriftRangerError("record exceeds 256 KiB")
+            value = json.loads(raw)
+            if not isinstance(value, dict) or value.get("schema_version") != 1:
+                raise DriftRangerError("unsupported record schema")
+            return value
+        except (OSError, ValueError) as exc:
+            raise DriftRangerError("cannot export an invalid or uncontained record") from exc
+
+    def text(value: Any) -> str:
+        if value is None:
+            return "Unknown"
+        if not isinstance(value, str):
+            raise DriftRangerError("record text must be a string")
+        return value
+
+    if not store.is_dir():
+        raise DriftRangerError("private store is unavailable; no snapshot written")
+    items = []
+    count = 0
+    for project in sorted(store.iterdir()):
+        if project.name == "observatory":
+            continue
+        if not project.is_dir() or not (project / "intent.json").exists():
+            continue
+        validate_id(project.name, "project id")
+        intent = record(project / "intent.json")
+        if intent.get("project_id") != project.name:
+            raise DriftRangerError("intent project identity mismatch")
+        events = []
+        for path in (project / "events").glob("*.json"):
+            count += 1
+            if count > 10000:
+                raise DriftRangerError("checkpoint limit exceeded")
+            event = record(path)
+            if event.get("project_id") != project.name:
+                raise DriftRangerError("checkpoint project identity mismatch")
+            event["_filename"] = path.name
+            events.append(event)
+        events.sort(key=lambda e: (text(e.get("recorded_at")), e["_filename"]))
+        latest = events[-1] if events else {}
+        summary = text(intent.get("intent"))
+        if len(summary) > 2000:
+            raise DriftRangerError("intent exceeds explorer summary limit")
+        items.append({
+            "id": "intent-" + hashlib.sha256(project.name.encode()).hexdigest()[:24],
+            "label": project.name,
+            "summary": summary,
+            "detail": {
+                "Intent": summary,
+                "Entry point": text(intent.get("entry_point")),
+                "Created at": text(intent.get("created_at")),
+                "Current capability": text(latest.get("can")),
+                "Remaining capability": text(latest.get("cannot")),
+                "Next gap": text(latest.get("next_gap", intent.get("initial_next_gap"))),
+                "Last checkpoint": text(latest.get("recorded_at")),
+                "Reported stage": text(latest.get("stage")),
+                "Reported progress": text(latest.get("progress")),
+                "Advisory": "REASSESS" if non_advancing_streak(events) >= 2 else
+                    ("Continue tracking" if events else "No checkpoints recorded"),
+                "Evidence boundary": "Agent assertions, not independently verified delivery.",
+            },
+        })
+        if len(items) > 1000:
+            raise DriftRangerError("project limit exceeded")
+    payload = {"schema": "explorer.v1", "generated_at":
+               datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "items": items}
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > 1000000:
+        raise DriftRangerError("snapshot exceeds 1 MB")
+    output_dir = store / "observatory"
+    output_dir.resolve(strict=False).relative_to(store)
+    output_dir.mkdir(exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output_dir, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(encoded)
+        temporary.replace(output_dir / "intents.json")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f"Refreshed private intent snapshot: {len(items)} projects.")
+
+
 def add_store_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--store",
@@ -276,6 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = commands.add_parser("list", help="list initialized project ids")
     add_store_argument(list_parser)
+    export_parser = commands.add_parser("export-observatory", help="refresh private intent explorer snapshot")
+    add_store_argument(export_parser)
     return parser
 
 
@@ -290,6 +386,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             command_checkpoint(args, store)
         elif args.command == "show":
             command_show(args, store)
+        elif args.command == "export-observatory":
+            command_export_observatory(store)
         elif args.command == "list":
             command_list(store)
         else:

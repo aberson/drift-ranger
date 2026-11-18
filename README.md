@@ -41,3 +41,25 @@ The CLI resolves the store path and refuses any location inside the repository, 
 Each project has an immutable initial `intent.json` and an `events` directory. Checkpoints are append-only in normal use and named by their unique unit ID. `show` orders events by their UTC record time and reports the latest capability assertion, next gap, latest reported stage, and non-advancing streak.
 
 The tool does not independently inspect builds, deployments, logs, or external services. Evidence text is an agent-provided note and must be evaluated by the reader.
+
+## Local intent explorer
+
+From this repository, run `python ./drift_ranger.py export-observatory` to refresh
+`observatory/intents.json` inside the default private store. Dev Observatory's
+**Show intents** uses its shared project ? list ? detail Explorer. **Refresh intents**
+under all verbs invokes this command; reload the page afterward. It displays a
+snapshot, not live monitoring, and rejects snapshots older than seven days.
+
+The artifact contains private intent and capability text. It stays outside Git and
+is available only in the local served Observatory, never static or portfolio exports.
+The command changes only this derived snapshot; immutable intent and append-only
+checkpoint records remain unchanged. Failed exports preserve the previous snapshot.
+A custom `--store` is supported by the CLI, but Observatory reads the default store only.
+
+The versioned payload uses `explorer.v1` with `generated_at` and `items` containing
+stable hashed `id`, project `label`, intent `summary` and readable `detail` fields.
+Inputs are bounded to 256 KiB per record, 1,000 projects and 10,000 checkpoints;
+output is bounded to 1 MB. Missing/invalid/oversized input fails visibly.
+
+Validate the exporter with `python -m unittest test_observatory_export.py` from this
+repository; tests use synthetic records in temporary external stores.
